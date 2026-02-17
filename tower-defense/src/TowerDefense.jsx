@@ -70,6 +70,199 @@ function generatePath(seed) {
 
   if (entryCol > 0) for (let c = 0; c < entryCol; c++) cells.add(`${c},1`);
 
+  const segments = 8 + Math.floor(rng() * 5);
+  let direction = rng() < 0.5 ? 1 : -1;
+  for (let seg = 0; seg < segments; seg++) {
+    let targetCol = direction > 0
+      ? Math.min(COLS - 2, col + 2 + Math.floor(rng() * 6))
+      : Math.max(1, col - 2 - Math.floor(rng() * 6));
+    goHoriz(col, targetCol, row); col = targetCol;
+    const drop = 1 + Math.floor(rng() * 3);
+    const newRow = Math.min(ROWS - 2, row + drop);
+    goVert(col, row, newRow); row = newRow;
+    if (row >= ROWS - 2) break;
+    if (rng() < 0.7 && row < ROWS - 4) {
+      const dc = Math.max(1, Math.min(COLS - 2, col + (rng() < 0.5 ? 1 : -1) * (1 + Math.floor(rng() * 4))));
+      goHoriz(col, dc, row); col = dc;
+      const dr = Math.min(ROWS - 2, row + 1 + Math.floor(rng() * 2));
+      goVert(col, row, dr); row = dr;
+    }
+    if (rng() < 0.3 && row < ROWS - 3) {
+      const back = Math.max(1, Math.min(COLS - 2, col + (direction > 0 ? -1 : 1) * (1 + Math.floor(rng() * 2))));
+      goHoriz(col, back, row); col = back;
+    }
+    direction *= -1;
+  }
+  if (row < ROWS - 2) { goVert(col, row, ROWS - 2); row = ROWS - 2; }
+  const exitCol = Math.min(COLS - 1, Math.max(col, COLS - 3 + Math.floor(rng() * 3)));
+  if (exitCol !== col) { goHoriz(col, exitCol, row); col = exitCol; }
+  for (let c = col; c < COLS; c++) cells.add(`${c},${row}`);
+  waypoints.push({ x: CW + 10, y: row * CELL + CELL / 2 });
+  return { cells, waypoints };
+}
+
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function generateCampaignSpiralCoord(index) {
+  if (index <= 0) return { x: 0, y: 0 };
+  let x = 0;
+  let y = 0;
+  let stepLen = 1;
+  let dir = 0; // 0:right, 1:down, 2:left, 3:up
+  let produced = 0;
+  const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+
+  while (produced < index) {
+    for (let rep = 0; rep < 2; rep++) {
+      const [dx, dy] = dirs[dir % 4];
+      for (let i = 0; i < stepLen; i++) {
+        x += dx;
+        y += dy;
+        produced++;
+        if (produced === index) return { x, y };
+      }
+      dir++;
+    }
+    stepLen++;
+  }
+  return { x, y };
+}
+
+function getCampaignTowerMapMultipliers(mapNum) {
+  const idx = Math.max(0, mapNum - 1);
+  return {
+    dmgMult: 1 + idx * 0.08,
+    rateMult: Math.max(0.75, 1 - idx * 0.03),
+    rangeMult: 1 + idx * 0.015,
+    hpBonusPerMap: 28,
+  };
+}
+
+// Generate a path inside a map tile that connects multiple border points.
+// borderPoints: array of {col, row, side} in local coordinates (0..COLS-1, 0..ROWS-1).
+// The path visits all border points, zigzagging through the map.
+function generateCampaignPath(seed, borderPoints) {
+  const rng = ((s) => {
+    let v = s;
+    return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; };
+  })(seed);
+
+  if (!borderPoints || borderPoints.length === 0) {
+    borderPoints = [{ col: 0, row: Math.floor(ROWS / 2), side: "left" }];
+  }
+
+  const cells = new Set();
+  // We'll build segments between consecutive border points
+  // and collect waypoints for each segment separately
+  const segmentWaypoints = []; // array of arrays of waypoints, one per border point pair
+
+  const goHoriz = (fromCol, toCol, r) => {
+    const dir = toCol > fromCol ? 1 : -1;
+    for (let c = fromCol; dir > 0 ? c <= toCol : c >= toCol; c += dir) cells.add(`${c},${r}`);
+  };
+  const goVert = (c, fromRow, toRow) => {
+    const dir = toRow > fromRow ? 1 : -1;
+    for (let r = fromRow; dir > 0 ? r <= toRow : r >= toRow; r += dir) cells.add(`${c},${r}`);
+  };
+
+  // Connect each pair of consecutive border points
+  for (let bp = 0; bp < borderPoints.length - 1; bp++) {
+    const start = borderPoints[bp];
+    const end = borderPoints[bp + 1];
+    const wps = [];
+    let col = start.col, row = start.row;
+    cells.add(`${col},${row}`);
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+
+    // Number of zigzag segments between these two points
+    const segments = 3 + Math.floor(rng() * 4);
+    for (let seg = 0; seg < segments; seg++) {
+      const progress = (seg + 1) / (segments + 1);
+      const targetRow = clamp(Math.round(row + (end.row - row) * progress + (rng() - 0.5) * 5), 1, ROWS - 2);
+      const targetCol = clamp(Math.round(col + (end.col - col) * progress + (rng() - 0.5) * 6), 1, COLS - 2);
+
+      if (rng() < 0.5) {
+        goHoriz(col, targetCol, row); col = targetCol;
+        wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+        goVert(col, row, targetRow); row = targetRow;
+        wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+      } else {
+        goVert(col, row, targetRow); row = targetRow;
+        wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+        goHoriz(col, targetCol, row); col = targetCol;
+        wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+      }
+
+      // Extra zigzag for complexity
+      if (rng() < 0.35 && seg < segments - 1) {
+        const zigCol = clamp(col + (rng() < 0.5 ? -1 : 1) * (2 + Math.floor(rng() * 3)), 1, COLS - 2);
+        goHoriz(col, zigCol, row); col = zigCol;
+        wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+      }
+    }
+
+    // Final connection to end point
+    if (col !== end.col) { goHoriz(col, end.col, row); col = end.col; }
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+    if (row !== end.row) { goVert(col, row, end.row); row = end.row; }
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+    cells.add(`${end.col},${end.row}`);
+
+    segmentWaypoints.push(wps);
+  }
+
+  // If only one border point, generate a path that goes into the map and back
+  if (borderPoints.length === 1) {
+    const bp = borderPoints[0];
+    const wps = [];
+    let col = bp.col, row = bp.row;
+    cells.add(`${col},${row}`);
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+    // Go to center of map
+    const midCol = Math.floor(COLS / 2);
+    const midRow = Math.floor(ROWS / 2);
+    goHoriz(col, midCol, row); col = midCol;
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+    goVert(col, row, midRow); row = midRow;
+    wps.push({ x: col * CELL + CELL / 2, y: row * CELL + CELL / 2 });
+    segmentWaypoints.push(wps);
+  }
+
+  // Flatten all waypoints in order
+  const allWaypoints = [];
+  segmentWaypoints.forEach((seg) => seg.forEach((wp) => allWaypoints.push(wp)));
+
+  return { cells, waypoints: allWaypoints, segmentWaypoints, borderPoints };
+}
+
+// Legacy function kept for normal/surprise modes
+function generatePathWithOptions(seed, options = {}) {
+  const rng = ((s) => {
+    let v = s;
+    return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; };
+  })(seed);
+
+  const cells = new Set();
+  const waypoints = [];
+  let row = clamp(options.entryRow ?? 1, 1, ROWS - 2);
+  const entryCol = clamp(options.entryCol ?? Math.floor(rng() * 3), 0, 2);
+  let col = entryCol;
+  waypoints.push({ x: -10, y: row * CELL + CELL / 2 });
+  cells.add(`${col},${row}`);
+
+  const goHoriz = (fromCol, toCol, r) => {
+    const dir = toCol > fromCol ? 1 : -1;
+    for (let c = fromCol; dir > 0 ? c <= toCol : c >= toCol; c += dir) cells.add(`${c},${r}`);
+    waypoints.push({ x: toCol * CELL + CELL / 2, y: r * CELL + CELL / 2 });
+  };
+  const goVert = (c, fromRow, toRow) => {
+    const dir = toRow > fromRow ? 1 : -1;
+    for (let r = fromRow; dir > 0 ? r <= toRow : r >= toRow; r += dir) cells.add(`${c},${r}`);
+    waypoints.push({ x: c * CELL + CELL / 2, y: toRow * CELL + CELL / 2 });
+  };
+
+  if (entryCol > 0) for (let c = 0; c < entryCol; c++) cells.add(`${c},${row}`);
+
   const segments = 5 + Math.floor(rng() * 4);
   let direction = rng() < 0.5 ? 1 : -1;
   for (let seg = 0; seg < segments; seg++) {
@@ -95,6 +288,333 @@ function generatePath(seed) {
   for (let c = col; c < COLS; c++) cells.add(`${c},${row}`);
   waypoints.push({ x: CW + 10, y: row * CELL + CELL / 2 });
   return { cells, waypoints };
+}
+
+function offsetPathToWorld(path, colOffset, rowOffset) {
+  const cells = new Set();
+  path.cells.forEach((key) => {
+    const [c, r] = key.split(",").map(Number);
+    cells.add(`${c + colOffset},${r + rowOffset}`);
+  });
+  const waypoints = path.waypoints.map((w) => ({
+    x: w.x + colOffset * CELL,
+    y: w.y + rowOffset * CELL,
+  }));
+  return { cells, waypoints };
+}
+
+function rebuildCampaignCompositePath(g) {
+  const cells = new Set();
+  (g.campaignMaps || []).forEach((m) => {
+    m.path.cells.forEach((k) => cells.add(k));
+  });
+  const latest = g.campaignMaps && g.campaignMaps.length > 0
+    ? g.campaignMaps[g.campaignMaps.length - 1].path
+    : g.path;
+  g.path = { cells, waypoints: latest.waypoints };
+  // Rebuild spawnPaths from stored borderEntries
+  g.spawnPaths = buildCampaignSpawnPaths(g.campaignMaps);
+}
+
+// For each map, build spawn paths from each border entry to the base (map 0).
+// Each spawn path chains: this map's entry→hub waypoints + through neighbor maps toward map 0.
+function buildCampaignSpawnPaths(maps) {
+  if (!maps || maps.length === 0) return [];
+  // Build adjacency: for each map, which maps are its neighbors and on which side
+  const spiralMap = new Map(); // "x,y" → map index
+  maps.forEach((m, i) => {
+    const sx = Math.round(m.colOffset / COLS);
+    const sy = Math.round(m.rowOffset / ROWS);
+    spiralMap.set(`${sx},${sy}`, i);
+  });
+
+  // BFS from each map to map 0 to find the shortest path through the map graph
+  function bfsMapPath(startIdx) {
+    if (startIdx === 0) return [0];
+    const q = [startIdx];
+    const prev = new Map();
+    prev.set(startIdx, -1);
+    let qi = 0;
+    while (qi < q.length) {
+      const cur = q[qi++];
+      if (cur === 0) break;
+      const m = maps[cur];
+      const sx = Math.round(m.colOffset / COLS);
+      const sy = Math.round(m.rowOffset / ROWS);
+      const nbs = [[sx + 1, sy], [sx - 1, sy], [sx, sy + 1], [sx, sy - 1]];
+      for (const [nx, ny] of nbs) {
+        const nk = `${nx},${ny}`;
+        if (spiralMap.has(nk) && !prev.has(spiralMap.get(nk))) {
+          const ni = spiralMap.get(nk);
+          prev.set(ni, cur);
+          q.push(ni);
+        }
+      }
+    }
+    if (!prev.has(0)) return [startIdx]; // can't reach base
+    const path = [];
+    let cur = 0;
+    while (cur !== -1) { path.push(cur); cur = prev.get(cur); }
+    path.reverse();
+    return path;
+  }
+
+  // For each map, find the border point on the side facing a given neighbor
+  function findBorderWpToward(mapIdx, neighborIdx) {
+    const m = maps[mapIdx];
+    const n = maps[neighborIdx];
+    const dx = Math.round((n.colOffset - m.colOffset) / COLS);
+    const dy = Math.round((n.rowOffset - m.rowOffset) / ROWS);
+    let targetSide = "";
+    if (dx === 1) targetSide = "right";
+    else if (dx === -1) targetSide = "left";
+    else if (dy === 1) targetSide = "bottom";
+    else if (dy === -1) targetSide = "top";
+    // Find the border point on that side
+    const bp = (m.borderPoints || []).find((b) => b.side === targetSide);
+    if (bp) return { col: m.colOffset + bp.col, row: m.rowOffset + bp.row };
+    // Fallback: middle of that edge
+    if (targetSide === "right") return { col: m.colOffset + COLS - 1, row: m.rowOffset + Math.floor(ROWS / 2) };
+    if (targetSide === "left") return { col: m.colOffset, row: m.rowOffset + Math.floor(ROWS / 2) };
+    if (targetSide === "bottom") return { col: m.colOffset + Math.floor(COLS / 2), row: m.rowOffset + ROWS - 1 };
+    if (targetSide === "top") return { col: m.colOffset + Math.floor(COLS / 2), row: m.rowOffset };
+    return { col: m.colOffset + Math.floor(COLS / 2), row: m.rowOffset + Math.floor(ROWS / 2) };
+  }
+
+  // Collect all spawn paths: one per "outer" border entry of each map
+  const spawnPaths = [];
+  maps.forEach((m, mapIdx) => {
+    // Find borders that DON'T connect to any existing map = spawn entries
+    const sx = Math.round(m.colOffset / COLS);
+    const sy = Math.round(m.rowOffset / ROWS);
+    const sides = ["left", "right", "top", "bottom"];
+    const sideDx = { left: -1, right: 1, top: 0, bottom: 0 };
+    const sideDy = { left: 0, right: 0, top: -1, bottom: 1 };
+
+    sides.forEach((side) => {
+      const nx = sx + sideDx[side];
+      const ny = sy + sideDy[side];
+      const neighborKey = `${nx},${ny}`;
+      if (spiralMap.has(neighborKey)) return; // not an outer border
+
+      const bp = (m.borderPoints || []).find((b) => b.side === side);
+      if (!bp) return;
+
+      // This is an outer border entry — build spawn waypoints from here to base
+      const startWp = { x: (m.colOffset + bp.col) * CELL + CELL / 2, y: (m.rowOffset + bp.row) * CELL + CELL / 2 };
+      const mapPath = bfsMapPath(mapIdx);
+
+      const chainWp = [startWp];
+      // Walk through each map in the path toward base
+      for (let pi = 0; pi < mapPath.length; pi++) {
+        const curMapIdx = mapPath[pi];
+        const curMap = maps[curMapIdx];
+
+        if (pi < mapPath.length - 1) {
+          // Add waypoints toward the border facing the next map
+          const nextMapIdx = mapPath[pi + 1];
+          const borderWp = findBorderWpToward(curMapIdx, nextMapIdx);
+          // Add the map's internal waypoints that lead to this border
+          // Use the segment waypoints from the border we entered to the border we exit
+          chainWp.push({ x: borderWp.col * CELL + CELL / 2, y: borderWp.row * CELL + CELL / 2 });
+        } else {
+          // Last map (base map) — walk to the center/hub of map 0
+          const hubWp = curMap.path.waypoints[Math.floor(curMap.path.waypoints.length / 2)];
+          if (hubWp) chainWp.push(hubWp);
+        }
+      }
+      spawnPaths.push(chainWp);
+    });
+  });
+
+  // If no outer borders found (shouldn't happen), fallback to last map's waypoints
+  if (spawnPaths.length === 0 && maps.length > 0) {
+    spawnPaths.push(maps[maps.length - 1].path.waypoints);
+  }
+
+  return spawnPaths;
+}
+
+function getCampaignWorldBounds(campaignMaps) {
+  if (!campaignMaps || campaignMaps.length === 0) {
+    return { minX: 0, minY: 0, maxX: CW, maxY: CH };
+  }
+  let minCol = Infinity, minRow = Infinity, maxCol = -Infinity, maxRow = -Infinity;
+  campaignMaps.forEach((m) => {
+    minCol = Math.min(minCol, m.colOffset);
+    minRow = Math.min(minRow, m.rowOffset);
+    maxCol = Math.max(maxCol, m.colOffset + COLS);
+    maxRow = Math.max(maxRow, m.rowOffset + ROWS);
+  });
+  return {
+    minX: minCol * CELL,
+    minY: minRow * CELL,
+    maxX: maxCol * CELL,
+    maxY: maxRow * CELL,
+  };
+}
+
+// For a given side ("left","right","top","bottom"), pick a random border point
+function pickBorderPoint(side, rng) {
+  const randRow = 2 + Math.floor(rng() * (ROWS - 4));
+  const randCol = 2 + Math.floor(rng() * (COLS - 4));
+  if (side === "left") return { col: 0, row: randRow, side };
+  if (side === "right") return { col: COLS - 1, row: randRow, side };
+  if (side === "top") return { col: randCol, row: 0, side };
+  if (side === "bottom") return { col: randCol, row: ROWS - 1, side };
+  return { col: 0, row: randRow, side };
+}
+
+// Get the matching border point on the adjacent map's side
+function mirrorBorderPoint(bp) {
+  if (bp.side === "left") return { col: COLS - 1, row: bp.row, side: "right" };
+  if (bp.side === "right") return { col: 0, row: bp.row, side: "left" };
+  if (bp.side === "top") return { col: bp.col, row: ROWS - 1, side: "bottom" };
+  if (bp.side === "bottom") return { col: bp.col, row: 0, side: "top" };
+  return bp;
+}
+
+// Get the opposite side
+function oppositeSide(side) {
+  if (side === "left") return "right";
+  if (side === "right") return "left";
+  if (side === "top") return "bottom";
+  if (side === "bottom") return "top";
+  return side;
+}
+
+// Get the side from one spiral position to an adjacent one
+function getSide(fromSpiral, toSpiral) {
+  const dx = toSpiral.x - fromSpiral.x;
+  const dy = toSpiral.y - fromSpiral.y;
+  if (dx === 1) return "right";
+  if (dx === -1) return "left";
+  if (dy === 1) return "bottom";
+  if (dy === -1) return "top";
+  return null;
+}
+
+// Build the full campaign world with multi-border maps.
+// Each map has an entry point on every border that touches another map.
+// Paths inside each map connect all its border points.
+function buildCampaignPreviewWorld(seedStart, levels = 3) {
+  const totalMaps = (levels * 2 - 1) ** 2;
+  let mapSeed = seedStart;
+  const rng = ((s) => {
+    let v = s;
+    return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; };
+  })(mapSeed);
+
+  // Pre-compute spiral positions
+  const spirals = [];
+  for (let i = 0; i < totalMaps; i++) spirals.push(generateCampaignSpiralCoord(i));
+
+  // Build a lookup: "spiralX,spiralY" → map index
+  const spiralLookup = new Map();
+  spirals.forEach((s, i) => spiralLookup.set(`${s.x},${s.y}`, i));
+
+  // Phase 1: Determine border points for each map.
+  // For each pair of adjacent maps, pick ONE shared connection point on the border.
+  // Store it so both maps use the same row/col on their shared edge.
+  const borderConnections = new Map(); // "mapA-mapB" (sorted) → { sideFromA, point: {col,row} }
+
+  function getConnectionKey(i, j) {
+    return i < j ? `${i}-${j}` : `${j}-${i}`;
+  }
+
+  // For each map, compute its neighbors and connection points
+  const mapBorderPoints = []; // array of arrays of {col,row,side}
+  for (let idx = 0; idx < totalMaps; idx++) {
+    const s = spirals[idx];
+    const neighbors = [
+      { dx: 1, dy: 0, side: "right" },
+      { dx: -1, dy: 0, side: "left" },
+      { dx: 0, dy: 1, side: "bottom" },
+      { dx: 0, dy: -1, side: "top" },
+    ];
+    const bps = [];
+    for (const n of neighbors) {
+      const nk = `${s.x + n.dx},${s.y + n.dy}`;
+      if (!spiralLookup.has(nk)) {
+        // Outer border — still add a border point for spawn entry
+        bps.push(pickBorderPoint(n.side, rng));
+        continue;
+      }
+      const neighborIdx = spiralLookup.get(nk);
+      const connKey = getConnectionKey(idx, neighborIdx);
+      if (!borderConnections.has(connKey)) {
+        // First time seeing this pair — pick the connection point
+        const bp = pickBorderPoint(n.side, rng);
+        borderConnections.set(connKey, { point: bp });
+        bps.push(bp);
+      } else {
+        // Already decided — use the mirror of the stored point
+        const stored = borderConnections.get(connKey);
+        const mirrored = mirrorBorderPoint(stored.point);
+        // Ensure side is correct for this map
+        mirrored.side = n.side;
+        // Row/col must match: for left/right borders row matches, for top/bottom col matches
+        if (n.side === "left" || n.side === "right") {
+          mirrored.row = stored.point.row;
+          mirrored.col = n.side === "left" ? 0 : COLS - 1;
+        } else {
+          mirrored.col = stored.point.col;
+          mirrored.row = n.side === "top" ? 0 : ROWS - 1;
+        }
+        bps.push(mirrored);
+      }
+    }
+    mapBorderPoints.push(bps);
+  }
+
+  // Phase 2: Generate paths inside each map connecting all its border points
+  const maps = [];
+  const allCells = new Set();
+
+  for (let idx = 0; idx < totalMaps; idx++) {
+    const spiral = spirals[idx];
+    const colOffset = spiral.x * COLS;
+    const rowOffset = spiral.y * ROWS;
+    const bps = mapBorderPoints[idx];
+
+    // Sort border points to create a good path: order by angle from center
+    const cx = COLS / 2, cy = ROWS / 2;
+    bps.sort((a, b) => Math.atan2(a.row - cy, a.col - cx) - Math.atan2(b.row - cy, b.col - cx));
+
+    const localPath = generateCampaignPath(mapSeed, bps);
+    const worldPath = offsetPathToWorld(localPath, colOffset, rowOffset);
+
+    const mapObj = {
+      index: idx, colOffset, rowOffset, path: worldPath,
+      borderPoints: bps, // local coordinates
+      spawnCell: { col: colOffset + bps[0].col, row: rowOffset + bps[0].row },
+    };
+    maps.push(mapObj);
+    worldPath.cells.forEach((k) => allCells.add(k));
+    mapSeed = mapSeed * 3 + 17;
+  }
+
+  // Phase 3: Build global waypoints and spawn paths
+  const globalWaypoints = [];
+  maps.forEach((m) => m.path.waypoints.forEach((wp) => globalWaypoints.push(wp)));
+
+  // Base cell = center of map 0
+  const centerMap = maps[0];
+  const baseCell = {
+    col: centerMap.colOffset + Math.floor(COLS / 2),
+    row: centerMap.rowOffset + Math.floor(ROWS / 2),
+  };
+
+  const spawnPaths = buildCampaignSpawnPaths(maps);
+
+  return {
+    maps,
+    path: { cells: allCells, waypoints: globalWaypoints },
+    spawnPaths,
+    baseCell,
+    mapSeed,
+    prevExitRow: Math.floor(ROWS / 2),
+  };
 }
 
 const TOWER_DEFS = {
@@ -145,12 +665,25 @@ const ENEMY_DEFS = {
   megaboss: { hp: 3000, speed: 0.35, gold: 300,color: "#dc2626", size: 18, shape: "star", shoots: true, eDmg: 20, eRange: 80, eRate: 1500 },
 };
 
-function generateWave(waveNum) {
+function generateWave(waveNum, options = {}) {
+  const mode = options.mode || "normal";
+  const mapNum = options.mapNum || 1;
+  const localWave = options.localWave || waveNum;
+  const tierWave = mode === "campaign" ? localWave : waveNum;
+  const progressionWave = mode === "campaign" ? (localWave + (mapNum - 1) * 2) : waveNum;
   const enemies = [];
-  const hpScale = 1 + waveNum * 0.28;
-  const spdScale = 1 + waveNum * 0.015;
-  const isBoss = waveNum % 5 === 0;
-  const isMega = waveNum % 10 === 0;
+  let hpScale = 1 + waveNum * 0.28;
+  let spdScale = 1 + waveNum * 0.015;
+  let isBoss = waveNum % 5 === 0;
+  let isMega = waveNum % 10 === 0;
+
+  if (mode === "campaign") {
+    isBoss = localWave >= 5;
+    isMega = localWave === 7;
+    const mapStrength = 1 + (mapNum - 1) * 0.16;
+    hpScale *= mapStrength;
+    spdScale *= 1 + (mapNum - 1) * 0.03;
+  }
 
   if (isMega) {
     enemies.push({ type: "megaboss", delay: 0 });
@@ -158,27 +691,37 @@ function generateWave(waveNum) {
     for (let i = 0; i < 3; i++) enemies.push({ type: "mage", delay: 700 + i * 600 });
   } else if (isBoss) {
     enemies.push({ type: "boss", delay: 0 });
-    for (let i = 0; i < 4 + waveNum / 4; i++) enemies.push({ type: Math.random() < 0.4 ? "sapper" : "orc", delay: 400 + i * 400 });
-  } else if (waveNum <= 2) {
-    for (let i = 0; i < 6 + waveNum * 3; i++) enemies.push({ type: "goblin", delay: i * 600 });
-  } else if (waveNum <= 4) {
-    for (let i = 0; i < 6 + waveNum * 2; i++) {
+    const extraBossAdds = mode === "campaign" ? Math.floor(localWave - 4) : 0;
+    for (let i = 0; i < 4 + waveNum / 4 + extraBossAdds; i++) enemies.push({ type: Math.random() < 0.4 ? "sapper" : "orc", delay: 400 + i * 400 });
+  } else if (tierWave <= 2) {
+    for (let i = 0; i < 6 + progressionWave * 3; i++) enemies.push({ type: "goblin", delay: i * 600 });
+  } else if (tierWave <= 4) {
+    for (let i = 0; i < 6 + progressionWave * 2; i++) {
       enemies.push({ type: Math.random() < 0.3 ? "orc" : "goblin", delay: i * 500 });
     }
-  } else if (waveNum <= 7) {
-    for (let i = 0; i < 8 + waveNum; i++) {
+  } else if (tierWave <= 7) {
+    for (let i = 0; i < 8 + progressionWave; i++) {
       const r = Math.random();
       const t = r < 0.15 ? "sapper" : r < 0.3 ? "wolf" : r < 0.5 ? "orc" : r < 0.65 ? "troll" : "goblin";
       enemies.push({ type: t, delay: i * 420 });
     }
   } else {
-    for (let i = 0; i < 10 + waveNum; i++) {
+    for (let i = 0; i < 10 + progressionWave; i++) {
       const r = Math.random();
       const t = r < 0.1 ? "mage" : r < 0.22 ? "sapper" : r < 0.35 ? "wolf" : r < 0.55 ? "troll" : r < 0.75 ? "orc" : "goblin";
       enemies.push({ type: t, delay: i * 330 });
     }
   }
-  return enemies.map((e) => ({ ...e, hpScale, spdScale }));
+  let out = enemies.map((e) => ({ ...e, hpScale, spdScale }));
+  if (mode === "campaign" && localWave >= 5) {
+    const bossStepMult = localWave === 5 ? 1.25 : localWave === 6 ? 1.45 : 1.75;
+    out = out.map((e) => ({
+      ...e,
+      hpScale: (e.hpScale || 1) * bossStepMult,
+      spdScale: (e.spdScale || 1) * (1 + (localWave - 4) * 0.03),
+    }));
+  }
+  return out;
 }
 
 function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
@@ -305,7 +848,8 @@ function generateEnemyBase(g) {
 
 export default function TowerDefense() {
   const canvasRef = useRef(null);
-  const [gameMode, setGameMode] = useState("menu"); // "menu", "normal", "surprise"
+  const panRef = useRef({ active: false, moved: false, lastX: 0, lastY: 0, startX: 0, startY: 0 });
+  const [gameMode, setGameMode] = useState("menu"); // "menu", "normal", "surprise", "campaign", "campaign-test"
   const [selectedTower, setSelectedTower] = useState(null);
   const [gold, setGold] = useState(250);
   const [lives, setLives] = useState(20);
@@ -326,6 +870,9 @@ export default function TowerDefense() {
   const [playerName, setPlayerName] = useState("");
   const [finalScore, setFinalScore] = useState(0);
   const [finalMode, setFinalMode] = useState("normal");
+  const [paused, setPaused] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [campaignCoord, setCampaignCoord] = useState({ x: 0, y: 0 });
 
   const gs = useRef({
     towers: [], enemies: [], bullets: [], eBullets: [], particles: [], texts: [], flashes: [], enemyTurrets: [], enemyBuildings: [],
@@ -334,8 +881,11 @@ export default function TowerDefense() {
     waveEnemies: [], waveTimer: 0, spawnIndex: 0,
     selectedTowerType: null, selectedPlacedTower: null,
     path: generatePath(42), mapSeed: 42, mapNum: 1,
+    campaignMaps: [], spawnPaths: [], camX: 0, camY: 0, zoom: 1, baseCell: null,
     lastTap: 0, healTimer: 0, veteranXp: 0, needsNewMap: false,
     waveMods: {}, mode: "normal", score: 0, totalKills: 0, basesDestroyed: 0,
+    campaignMapIndex: 0, campaignPrevExitRow: 1,
+    paused: false,
   });
 
   // Highscore system using persistent storage
@@ -391,6 +941,8 @@ export default function TowerDefense() {
     setPhase(g.phase); setSelectedPlaced(g.selectedPlacedTower);
     setMapNum(g.mapNum); setNeedsNewMap(g.needsNewMap);
     setScore(g.score);
+    setZoom(g.zoom || 1);
+    setCampaignCoord(generateCampaignSpiralCoord(g.campaignMapIndex || 0));
   }, []);
 
   const restartGame = useCallback(() => {
@@ -402,9 +954,14 @@ export default function TowerDefense() {
     g.waveEnemies = []; g.waveTimer = 0; g.spawnIndex = 0;
     g.selectedTowerType = null; g.selectedPlacedTower = null;
     g.mapSeed = Date.now() % 100000; g.path = generatePath(g.mapSeed);
+    g.campaignMaps = []; g.spawnPaths = []; g.camX = 0; g.camY = 0; g.zoom = 1; g.baseCell = null;
     g.mapNum = 1; g.needsNewMap = false; g.healTimer = 0; g.veteranXp = 0;
     g.waveMods = {}; g.score = 0; g.totalKills = 0; g.basesDestroyed = 0;
+    g.campaignMapIndex = 0; g.campaignPrevExitRow = 1;
+    g.paused = false;
+    setZoom(1);
     setSelectedTower(null);
+    setPaused(false);
     setRouletteActive(false); setRouletteResult(null);
     setUnlockedBuildings([]);
     setGameMode("menu");
@@ -417,14 +974,88 @@ export default function TowerDefense() {
     const totalXp = g.towers.reduce((sum, t) => sum + t.xp, 0);
     g.veteranXp = Math.floor(totalXp * 0.4); // 40% XP carries over
     g.mapSeed = g.mapSeed * 3 + 17;
-    g.path = generatePath(g.mapSeed);
+    if (g.mode === "campaign") {
+      const nextIndex = (g.campaignMapIndex || 0) + 1;
+      const nextSpiral = generateCampaignSpiralCoord(nextIndex);
+      const colOffset = nextSpiral.x * COLS;
+      const rowOffset = nextSpiral.y * ROWS;
+
+      // Determine border points for the new map
+      const connRng = ((s) => { let v = s; return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; }; })(g.mapSeed);
+
+      // Build a spiral lookup of existing maps
+      const spiralLookup = new Map();
+      g.campaignMaps.forEach((m) => {
+        const sx = Math.round(m.colOffset / COLS);
+        const sy = Math.round(m.rowOffset / ROWS);
+        spiralLookup.set(`${sx},${sy}`, m);
+      });
+
+      const bps = [];
+      const sides = [
+        { side: "left", dx: -1, dy: 0 },
+        { side: "right", dx: 1, dy: 0 },
+        { side: "top", dx: 0, dy: -1 },
+        { side: "bottom", dx: 0, dy: 1 },
+      ];
+
+      for (const s of sides) {
+        const neighborKey = `${nextSpiral.x + s.dx},${nextSpiral.y + s.dy}`;
+        const neighborMap = spiralLookup.get(neighborKey);
+        if (neighborMap) {
+          // This side connects to an existing map — match their border point
+          const theirSide = oppositeSide(s.side);
+          const theirBp = (neighborMap.borderPoints || []).find((b) => b.side === theirSide);
+          if (theirBp) {
+            // Mirror the point: same row for left/right, same col for top/bottom
+            const bp = { ...mirrorBorderPoint(theirBp), side: s.side };
+            bps.push(bp);
+          } else {
+            bps.push(pickBorderPoint(s.side, connRng));
+          }
+        } else {
+          // Outer border — spawn entry
+          bps.push(pickBorderPoint(s.side, connRng));
+        }
+      }
+
+      // Sort by angle from center for path generation
+      const cx = COLS / 2, cy = ROWS / 2;
+      bps.sort((a, b) => Math.atan2(a.row - cy, a.col - cx) - Math.atan2(b.row - cy, b.col - cx));
+
+      const localPath = generateCampaignPath(g.mapSeed, bps);
+      const worldPath = offsetPathToWorld(localPath, colOffset, rowOffset);
+      const newMapObj = {
+        index: nextIndex, colOffset, rowOffset, path: worldPath,
+        borderPoints: bps,
+        spawnCell: { col: colOffset + bps[0].col, row: rowOffset + bps[0].row },
+      };
+
+      g.campaignMaps.push(newMapObj);
+      g.campaignMapIndex = nextIndex;
+      rebuildCampaignCompositePath(g);
+
+      const bounds = getCampaignWorldBounds(g.campaignMaps);
+      const viewW = CW / (g.zoom || 1);
+      const viewH = CH / (g.zoom || 1);
+      g.camX = clamp(colOffset * CELL + viewW * 0.2, bounds.minX - viewW * 0.25, bounds.maxX - viewW + viewW * 0.25);
+      g.camY = clamp(rowOffset * CELL + viewH * 0.2, bounds.minY - viewH * 0.25, bounds.maxY - viewH + viewH * 0.25);
+    } else {
+      g.path = generatePath(g.mapSeed);
+      g.spawnPaths = [g.path.waypoints];
+    }
     g.mapNum++;
-    g.towers = []; g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = []; g.enemyTurrets = []; g.enemyBuildings = [];
+    if (g.mode === "campaign") {
+      g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = [];
+      g.enemyTurrets = []; g.enemyBuildings = [];
+    } else {
+      g.towers = []; g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = []; g.enemyTurrets = []; g.enemyBuildings = [];
+    }
     g.enemyBase = null; g.altPath = null; g.altPathCells = null; g.frozenZones = [];
     // Scaled gold bonus: 200 base + 50 per map + refund for lost towers
     g.gold += 250 + g.mapNum * 75;
     // Map change score bonus
-    g.score += Math.floor(SCORE_POINTS.map_change * (g.mode === "surprise" ? 1.5 : 1));
+    g.score += Math.floor(SCORE_POINTS.map_change * (g.mode === "surprise" ? 1.5 : g.mode === "campaign" ? 1.25 : 1));
     g.selectedPlacedTower = null; g.selectedTowerType = null;
     g.needsNewMap = false;
     setSelectedTower(null);
@@ -497,7 +1128,8 @@ export default function TowerDefense() {
   // Called DIRECTLY if no roulette, or AFTER roulette animation finishes.
   const beginSpawning = useCallback((waveNum) => {
     const g = gs.current;
-    g.waveEnemies = generateWave(waveNum);
+    const localWave = g.mode === "campaign" ? ((waveNum - 1) % 7) + 1 : waveNum;
+    g.waveEnemies = generateWave(waveNum, { mode: g.mode, mapNum: g.mapNum, localWave });
     g.spawnIndex = 0; g.waveTimer = 0;
 
     // Apply roulette mods to enemies if any
@@ -570,6 +1202,8 @@ export default function TowerDefense() {
 
   const startWave = useCallback(() => {
     const g = gs.current;
+    if (g.paused) return;
+    if (g.mode === "campaign-test") return;
     if (g.phase !== "prep") return;
     if (g.needsNewMap) { newMap(); return; }
     g.wave++;
@@ -578,8 +1212,8 @@ export default function TowerDefense() {
     g.selectedPlacedTower = null; g.waveMods = {};
     g.phase = "busy"; // not "prep" (hides button), not "wave" (no spawn)
 
-    // Surprise mode: unlock building every 3 waves
-    if (g.mode === "surprise" && g.wave % 3 === 0) {
+    // Surprise/Campaign mode: unlock building every 3 waves
+    if ((g.mode === "surprise" || g.mode === "campaign") && g.wave % 3 === 0) {
       const unlockIdx = Math.floor(g.wave / 3) - 1;
       if (unlockIdx < BUILDING_KEYS.length) {
         const newKey = BUILDING_KEYS[unlockIdx];
@@ -678,7 +1312,10 @@ export default function TowerDefense() {
     if (!g.enemyBase) {
       g.altPath = null; g.altPathCells = null;
     }
-    if (g.wave >= 13 && !g.enemyBase && Math.random() < 0.35) {
+    const localWaveForBase = g.mode === "campaign" ? ((g.wave - 1) % 7) + 1 : g.wave;
+    const canSpawnBase = g.mode === "campaign" ? g.wave > 7 : g.wave >= 13;
+    const baseChance = g.mode === "campaign" ? 0.55 : 0.35;
+    if (canSpawnBase && !g.enemyBase && Math.random() < baseChance) {
       const base = generateEnemyBase(g);
       if (base) {
         g.enemyBase = base;
@@ -749,6 +1386,7 @@ export default function TowerDefense() {
 
   const handleCanvasTap = useCallback((cx, cy) => {
     const g = gs.current;
+    if (g.paused) return;
     const now = Date.now();
     if (now - g.lastTap < 200) return;
     g.lastTap = now;
@@ -768,7 +1406,14 @@ export default function TowerDefense() {
     if (g.phase === "scoreboard") return;
 
     const col = Math.floor(cx / CELL), row = Math.floor(cy / CELL);
-    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+    if (g.mode === "campaign") {
+      const inAnyMap = (g.campaignMaps || []).some((m) => (
+        col >= m.colOffset && col < m.colOffset + COLS && row >= m.rowOffset && row < m.rowOffset + ROWS
+      ));
+      if (!inAnyMap) return;
+    } else {
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+    }
 
     const existing = g.towers.find((t) => t.col === col && t.row === row);
     if (existing) {
@@ -786,16 +1431,20 @@ export default function TowerDefense() {
         g.gold -= def.cost;
         const startXp = g.veteranXp || 0;
         const rank = getRank(startXp);
-        const baseMaxHp = Math.floor((def.maxHp + (g.mapNum - 1) * 20) * rank.hpMult);
-        const tDmg = Math.floor(def.damage * rank.dmgMult);
-        const tRate = Math.max(200, Math.floor(def.rate * rank.rateMult));
+        const camp = g.mode === "campaign" ? getCampaignTowerMapMultipliers(g.mapNum) : { dmgMult: 1, rateMult: 1, rangeMult: 1, hpBonusPerMap: 20 };
+        const mapHpBonus = (g.mapNum - 1) * camp.hpBonusPerMap;
+        const baseRange = Math.floor(def.range * camp.rangeMult);
+        const baseMaxHp = Math.floor((def.maxHp + mapHpBonus) * rank.hpMult);
+        const tDmg = Math.floor(def.damage * rank.dmgMult * camp.dmgMult);
+        const tRate = Math.max(200, Math.floor(def.rate * rank.rateMult * camp.rateMult));
         g.towers.push({
           col, row, x: col * CELL + CELL / 2, y: row * CELL + CELL / 2,
           type: g.selectedTowerType, level: 1, lastShot: 0,
-          baseDamage: def.damage, baseRange: def.range, baseRate: def.rate,
-          damage: tDmg, range: def.range, rate: tRate,
+          baseDamage: def.damage, baseRange, baseRate: def.rate,
+          damage: tDmg, range: baseRange, rate: tRate,
           hp: baseMaxHp, maxHp: baseMaxHp, baseMaxHp,
           armor: def.armor + rank.rank, xp: startXp, kills: 0,
+          mapDmgMult: camp.dmgMult, mapRateMult: camp.rateMult, mapHpBonus,
         });
         // Rank up particles if veteran
         if (rank.rank > 0) {
@@ -818,10 +1467,10 @@ export default function TowerDefense() {
       const lvlDmg = def.upgDmg * (t.level - 1);
       const lvlRange = def.upgRange * (t.level - 1);
       const lvlRate = 60 * (t.level - 1);
-      t.damage = Math.floor((t.baseDamage + lvlDmg) * rank.dmgMult);
+      t.damage = Math.floor((t.baseDamage + lvlDmg) * rank.dmgMult * (t.mapDmgMult || 1));
       t.range = t.baseRange + lvlRange;
-      t.rate = Math.max(200, Math.floor((t.baseRate - lvlRate) * rank.rateMult));
-      t.baseMaxHp = Math.floor((def.maxHp + (g.mapNum - 1) * 20 + (t.level - 1) * 20) * rank.hpMult);
+      t.rate = Math.max(200, Math.floor((t.baseRate - lvlRate) * rank.rateMult * (t.mapRateMult || 1)));
+      t.baseMaxHp = Math.floor((def.maxHp + (t.mapHpBonus ?? ((g.mapNum - 1) * 20)) + (t.level - 1) * 20) * rank.hpMult);
       t.maxHp = t.baseMaxHp;
       t.hp = Math.min(t.hp + 40, t.maxHp);
       t.armor = def.armor + rank.rank;
@@ -850,14 +1499,143 @@ export default function TowerDefense() {
     g.selectedPlacedTower = null; syncState();
   }, [syncState]);
 
+  const togglePause = useCallback(() => {
+    const g = gs.current;
+    if (gameMode === "menu") return;
+    if (g.phase === "gameover" || g.phase === "scoreboard") return;
+    g.paused = !g.paused;
+    setPaused(g.paused);
+  }, [gameMode]);
+
+  const nudgeCamera = useCallback((dx, dy) => {
+    const g = gs.current;
+    if (g.mode !== "campaign" && g.mode !== "campaign-test") return;
+    const bounds = getCampaignWorldBounds(g.campaignMaps);
+    const viewW = CW / (g.zoom || 1);
+    const viewH = CH / (g.zoom || 1);
+    const padX = viewW * 0.25;
+    const padY = viewH * 0.25;
+    g.camX = clamp(g.camX + dx, bounds.minX - padX, bounds.maxX - viewW + padX);
+    g.camY = clamp(g.camY + dy, bounds.minY - padY, bounds.maxY - viewH + padY);
+    syncState();
+  }, [syncState]);
+
+  const adjustZoom = useCallback((delta) => {
+    const g = gs.current;
+    if (g.mode !== "campaign" && g.mode !== "campaign-test") return;
+    const oldZoom = g.zoom || 1;
+    const nextZoom = clamp(oldZoom + delta, 0.35, 2.2);
+    if (Math.abs(nextZoom - oldZoom) < 0.001) return;
+    const centerX = g.camX + CW / oldZoom / 2;
+    const centerY = g.camY + CH / oldZoom / 2;
+    g.zoom = nextZoom;
+    const viewW = CW / nextZoom;
+    const viewH = CH / nextZoom;
+    g.camX = centerX - viewW / 2;
+    g.camY = centerY - viewH / 2;
+    const bounds = getCampaignWorldBounds(g.campaignMaps);
+    const padX = viewW * 0.25;
+    const padY = viewH * 0.25;
+    g.camX = clamp(g.camX, bounds.minX - padX, bounds.maxX - viewW + padX);
+    g.camY = clamp(g.camY, bounds.minY - padY, bounds.maxY - viewH + padY);
+    syncState();
+  }, [syncState]);
+
   const startMode = useCallback((mode) => {
     const g = gs.current;
     g.mode = mode;
     g.waveMods = {};
+    g.campaignMapIndex = 0;
+    g.campaignPrevExitRow = 1;
+    g.paused = false;
+    g.camX = 0; g.camY = 0; g.zoom = 1;
+    if (mode === "campaign") {
+      // First map: border entries on all 4 sides
+      const connRng = ((s) => { let v = s; return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; }; })(g.mapSeed);
+      const bps = [
+        pickBorderPoint("left", connRng),
+        pickBorderPoint("right", connRng),
+        pickBorderPoint("top", connRng),
+        pickBorderPoint("bottom", connRng),
+      ];
+      // Sort by angle from center for path generation
+      const cx = COLS / 2, cy = ROWS / 2;
+      bps.sort((a, b) => Math.atan2(a.row - cy, a.col - cx) - Math.atan2(b.row - cy, b.col - cx));
+      const localPath = generateCampaignPath(g.mapSeed, bps);
+      const basePath = offsetPathToWorld(localPath, 0, 0);
+      const firstMap = {
+        index: 0, colOffset: 0, rowOffset: 0, path: basePath,
+        borderPoints: bps,
+        spawnCell: { col: bps[0].col, row: bps[0].row },
+      };
+      g.campaignMaps = [firstMap];
+      g.path = { cells: new Set(basePath.cells), waypoints: basePath.waypoints };
+      g.baseCell = { col: Math.floor(COLS / 2), row: Math.floor(ROWS / 2) };
+      g.spawnPaths = buildCampaignSpawnPaths(g.campaignMaps);
+      g.campaignMapIndex = 0;
+      g.zoom = 1;
+      g.wave = 0; g.phase = "prep"; g.needsNewMap = false;
+      g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = []; g.enemyTurrets = []; g.enemyBuildings = [];
+      g.enemyBase = null; g.altPath = null; g.altPathCells = null; g.frozenZones = [];
+      g.selectedPlacedTower = null; g.selectedTowerType = null;
+      setUnlockedBuildings([]);
+    } else if (mode === "campaign-test") {
+      const preview = buildCampaignPreviewWorld(g.mapSeed, 3);
+      g.campaignMaps = preview.maps;
+      g.path = preview.path;
+      g.spawnPaths = preview.spawnPaths;
+      g.baseCell = preview.baseCell;
+      g.mapSeed = preview.mapSeed;
+      g.campaignPrevExitRow = preview.prevExitRow;
+      g.campaignMapIndex = preview.maps.length - 1;
+      g.mapNum = preview.maps.length;
+      g.wave = 0; g.phase = "prep"; g.needsNewMap = false;
+      g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = []; g.enemyTurrets = []; g.enemyBuildings = [];
+      g.enemyBase = null; g.altPath = null; g.altPathCells = null; g.frozenZones = [];
+      g.selectedPlacedTower = null; g.selectedTowerType = null;
+      const bounds = getCampaignWorldBounds(preview.maps);
+      const worldW = Math.max(1, bounds.maxX - bounds.minX);
+      const worldH = Math.max(1, bounds.maxY - bounds.minY);
+      const fitZoom = clamp(Math.min((CW * 0.92) / worldW, (CH * 0.92) / worldH), 0.35, 1);
+      g.zoom = fitZoom;
+      const viewW = CW / g.zoom;
+      const viewH = CH / g.zoom;
+      g.camX = clamp((bounds.minX + bounds.maxX - viewW) / 2, bounds.minX - viewW * 0.25, bounds.maxX - viewW + viewW * 0.25);
+      g.camY = clamp((bounds.minY + bounds.maxY - viewH) / 2, bounds.minY - viewH * 0.25, bounds.maxY - viewH + viewH * 0.25);
+      setUnlockedBuildings([]);
+    } else {
+      g.campaignMaps = [];
+      g.path = generatePath(g.mapSeed);
+      g.spawnPaths = [g.path.waypoints];
+      g.baseCell = null;
+      g.zoom = 1;
+      g.selectedPlacedTower = null;
+      g.selectedTowerType = null;
+      if (mode === "normal") setUnlockedBuildings([...BUILDING_KEYS]);
+      else setUnlockedBuildings([]);
+    }
+    setPaused(false);
     setGameMode(mode);
-    if (mode === "normal") setUnlockedBuildings([...BUILDING_KEYS]);
-    else setUnlockedBuildings([]);
-  }, []);
+    syncState();
+  }, [syncState]);
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.key === "p" || e.key === "P" || e.code === "Space") {
+        e.preventDefault();
+        togglePause();
+      }
+      const step = CELL * 2;
+      if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") nudgeCamera(-step, 0);
+      if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") nudgeCamera(step, 0);
+      if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") nudgeCamera(0, -step);
+      if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") nudgeCamera(0, step);
+      if (e.key === "+" || e.key === "=") adjustZoom(0.1);
+      if (e.key === "-" || e.key === "_") adjustZoom(-0.1);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [togglePause, nudgeCamera, adjustZoom]);
 
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
@@ -868,14 +1646,19 @@ export default function TowerDefense() {
       const dt = Math.min(now - lastTime, 50); lastTime = now;
       const g = gs.current; const wp = g.path.waypoints;
 
+      if (!g.paused) {
+
       // Spawn — only when phase is "wave" (not during roulette "busy" phase)
       if (g.phase === "wave" && g.spawnIndex < g.waveEnemies.length) {
         g.waveTimer += dt;
         const ne = g.waveEnemies[g.spawnIndex];
         if (g.waveTimer >= ne.delay) {
+          const spawnPaths = ((g.mode === "campaign" || g.mode === "campaign-test") && (g.spawnPaths || []).length > 0) ? g.spawnPaths : [wp];
+          // In campaign, enemies cycle through all outer border spawn paths
+          const chosenWp = spawnPaths[g.spawnIndex % spawnPaths.length] || wp;
           const def = ENEMY_DEFS[ne.type];
           const enemy = {
-            x: wp[0].x, y: wp[0].y,
+            x: chosenWp[0].x, y: chosenWp[0].y,
             hp: Math.floor(def.hp * ne.hpScale), maxHp: Math.floor(def.hp * ne.hpScale),
             speed: def.speed * ne.spdScale, baseSpeed: def.speed * ne.spdScale,
             gold: def.gold + Math.floor(g.wave * 2.5),
@@ -888,9 +1671,10 @@ export default function TowerDefense() {
             eRate: def.eRate || 9999,
             lastEShot: 0,
           };
+          enemy.customWp = chosenWp;
           // Alt path: after 1st cell, teleport to base center and follow alt path
           if (ne.useAltPath && g.altPath && g.enemyBase && g.enemyBase.alive) {
-            enemy.customWp = [wp[0], ...g.altPath];
+            enemy.customWp = [chosenWp[0], ...g.altPath];
             enemy.useAltPath = true;
           }
           g.enemies.push(enemy);
@@ -1373,10 +2157,10 @@ export default function TowerDefense() {
               const lvlDmg = def.upgDmg * (killer.level - 1);
               const lvlRange = def.upgRange * (killer.level - 1);
               const lvlRate = 60 * (killer.level - 1);
-              killer.damage = Math.floor((killer.baseDamage + lvlDmg) * newRank.dmgMult);
+              killer.damage = Math.floor((killer.baseDamage + lvlDmg) * newRank.dmgMult * (killer.mapDmgMult || 1));
               killer.range = Math.floor((killer.baseRange + lvlRange) * 1);
-              killer.rate = Math.max(200, Math.floor((killer.baseRate - lvlRate) * newRank.rateMult));
-              killer.baseMaxHp = Math.floor((def.maxHp + (g.mapNum - 1) * 20 + (killer.level - 1) * 20) * newRank.hpMult);
+              killer.rate = Math.max(200, Math.floor((killer.baseRate - lvlRate) * newRank.rateMult * (killer.mapRateMult || 1)));
+              killer.baseMaxHp = Math.floor((def.maxHp + (killer.mapHpBonus ?? ((g.mapNum - 1) * 20)) + (killer.level - 1) * 20) * newRank.hpMult);
               killer.maxHp = killer.baseMaxHp;
               killer.hp = killer.maxHp; // full heal on rank up!
               killer.armor = def.armor + newRank.rank;
@@ -1398,7 +2182,7 @@ export default function TowerDefense() {
       // Wave clear check
       if (g.phase === "wave" && g.spawnIndex >= g.waveEnemies.length && g.enemies.length === 0) {
         g.phase = "prep";
-        if (g.wave % 10 === 0) g.needsNewMap = true;
+        if (g.wave % (g.mode === "campaign" ? 7 : 10) === 0) g.needsNewMap = true;
         // Clear base state only if destroyed; persist if alive
         if (g.enemyBase && g.enemyBase.alive) {
           g.enemyBase.wavesSurvived++;
@@ -1432,6 +2216,7 @@ export default function TowerDefense() {
         g.waveMods = {};
       }
       syncState();
+      }
 
       // === DRAW ===
       ctx.clearRect(0, 0, CW, CH);
@@ -1441,6 +2226,29 @@ export default function TowerDefense() {
 
       ctx.fillStyle = "rgba(255,255,255,0.03)";
       for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) ctx.fillRect(c * CELL + CELL / 2, r * CELL + CELL / 2, 1, 1);
+
+      ctx.save();
+      if (g.mode === "campaign" || g.mode === "campaign-test") {
+        const z = g.zoom || 1;
+        ctx.setTransform(z, 0, 0, z, -g.camX * z, -g.camY * z);
+      }
+
+      if ((g.mode === "campaign" || g.mode === "campaign-test") && (g.campaignMaps || []).length > 0) {
+        g.campaignMaps.forEach((m) => {
+          const x = m.colOffset * CELL;
+          const y = m.rowOffset * CELL;
+          ctx.fillStyle = "rgba(20,30,45,0.35)";
+          ctx.fillRect(x, y, CW, CH);
+          ctx.strokeStyle = "rgba(96,165,250,0.28)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
+          ctx.fillStyle = "rgba(96,165,250,0.45)";
+          ctx.font = `6px ${PIXEL_FONT}`;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "top";
+          ctx.fillText(`M${m.index + 1}`, x + 4, y + 4);
+        });
+      }
 
       // Path
       g.path.cells.forEach((key) => {
@@ -1455,8 +2263,38 @@ export default function TowerDefense() {
       });
 
       ctx.font = `7px ${PIXEL_FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillStyle = "rgba(74,222,128,0.4)"; ctx.fillText("▶IN", 14, wp[0].y);
-      ctx.fillStyle = "rgba(239,68,68,0.4)"; ctx.fillText("OUT▶", CW - 14, wp[wp.length - 1].y);
+      if (g.mode === "campaign" || g.mode === "campaign-test") {
+        // Show base marker
+        if (g.baseCell) {
+          ctx.fillStyle = "rgba(239,68,68,0.8)";
+          ctx.fillText("🏠", g.baseCell.col * CELL + CELL / 2, g.baseCell.row * CELL + CELL / 2);
+        }
+        // Show border entry markers on each map
+        const spiralLookup = new Set();
+        (g.campaignMaps || []).forEach((m) => {
+          const sx = Math.round(m.colOffset / COLS);
+          const sy = Math.round(m.rowOffset / ROWS);
+          spiralLookup.add(`${sx},${sy}`);
+        });
+        (g.campaignMaps || []).forEach((m) => {
+          const sx = Math.round(m.colOffset / COLS);
+          const sy = Math.round(m.rowOffset / ROWS);
+          const sideDx = { left: -1, right: 1, top: 0, bottom: 0 };
+          const sideDy = { left: 0, right: 0, top: -1, bottom: 1 };
+          (m.borderPoints || []).forEach((bp) => {
+            const nx = sx + (sideDx[bp.side] || 0);
+            const ny = sy + (sideDy[bp.side] || 0);
+            const isOuter = !spiralLookup.has(`${nx},${ny}`);
+            if (isOuter) {
+              ctx.fillStyle = "rgba(74,222,128,0.6)";
+              ctx.fillText("▶", (m.colOffset + bp.col) * CELL + CELL / 2, (m.rowOffset + bp.row) * CELL + CELL / 2);
+            }
+          });
+        });
+      } else {
+        ctx.fillStyle = "rgba(74,222,128,0.4)"; ctx.fillText("▶IN", 14, wp[0].y);
+        ctx.fillStyle = "rgba(239,68,68,0.4)"; ctx.fillText("OUT▶", CW - 14, wp[wp.length - 1].y);
+      }
 
       // Alt path (orange) when enemy base is alive
       if (g.altPathCells && g.enemyBase && g.enemyBase.alive) {
@@ -1776,6 +2614,8 @@ export default function TowerDefense() {
       g.texts.forEach((t) => { ctx.globalAlpha = Math.max(0, t.life); ctx.font = `7px ${PIXEL_FONT}`; ctx.fillStyle = "#fbbf24"; ctx.textAlign = "center"; ctx.fillText(t.text, t.x, t.y); });
       ctx.globalAlpha = 1;
 
+      ctx.restore();
+
       // Game over
       if (g.phase === "gameover" || g.phase === "scoreboard") {
         ctx.fillStyle = "rgba(0,0,0,0.75)"; ctx.fillRect(0, 0, CW, CH);
@@ -1793,6 +2633,15 @@ export default function TowerDefense() {
         ctx.fillText("CLIQUE POUR CONTINUER", CW / 2, CH / 2 + 60);
       }
 
+      if (g.paused && g.phase !== "gameover" && g.phase !== "scoreboard") {
+        ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, 0, CW, CH);
+        ctx.textAlign = "center";
+        ctx.font = `14px ${PIXEL_FONT}`; ctx.fillStyle = "#fbbf24";
+        ctx.fillText("PAUSE", CW / 2, CH / 2 - 8);
+        ctx.font = `7px ${PIXEL_FONT}`; ctx.fillStyle = "#94a3b8";
+        ctx.fillText("P / Espace pour reprendre", CW / 2, CH / 2 + 18);
+      }
+
       ctx.fillStyle = "rgba(0,0,0,0.04)";
       for (let sl = 0; sl < CH; sl += 3) ctx.fillRect(0, sl, CW, 1);
 
@@ -1802,14 +2651,63 @@ export default function TowerDefense() {
     return () => cancelAnimationFrame(animId);
   }, [syncState, gameMode]);
 
-  const handleCanvasClick = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    handleCanvasTap((e.clientX - rect.left) * (CW / rect.width), (e.clientY - rect.top) * (CH / rect.height));
+  const handleCanvasPointerDown = (e) => {
+    const g = gs.current;
+    if (g.mode !== "campaign" && g.mode !== "campaign-test") return;
+    panRef.current.active = true;
+    panRef.current.moved = false;
+    panRef.current.lastX = e.clientX;
+    panRef.current.lastY = e.clientY;
+    panRef.current.startX = e.clientX;
+    panRef.current.startY = e.clientY;
+    canvasRef.current?.setPointerCapture?.(e.pointerId);
   };
-  const handleTouchEnd = (e) => {
-    e.preventDefault(); if (!e.changedTouches.length) return;
-    const t = e.changedTouches[0]; const rect = canvasRef.current.getBoundingClientRect();
-    handleCanvasTap((t.clientX - rect.left) * (CW / rect.width), (t.clientY - rect.top) * (CH / rect.height));
+
+  const handleCanvasPointerMove = (e) => {
+    if (!panRef.current.active) return;
+    const g = gs.current;
+    if (g.mode !== "campaign" && g.mode !== "campaign-test") return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const scaleX = CW / rect.width;
+    const scaleY = CH / rect.height;
+    const dx = e.clientX - panRef.current.lastX;
+    const dy = e.clientY - panRef.current.lastY;
+    const totalMove = Math.abs(e.clientX - panRef.current.startX) + Math.abs(e.clientY - panRef.current.startY);
+    if (totalMove > 6) panRef.current.moved = true;
+    panRef.current.lastX = e.clientX;
+    panRef.current.lastY = e.clientY;
+    if (dx !== 0 || dy !== 0) {
+      // drag map with finger/mouse: camera moves opposite to pointer delta
+      nudgeCamera((-dx * scaleX) / (g.zoom || 1), (-dy * scaleY) / (g.zoom || 1));
+    }
+  };
+
+  const handleCanvasPointerUp = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const g = gs.current;
+    const sx = (e.clientX - rect.left) * (CW / rect.width);
+    const sy = (e.clientY - rect.top) * (CH / rect.height);
+    const wasDrag = panRef.current.active && panRef.current.moved;
+    panRef.current.active = false;
+    panRef.current.moved = false;
+    if ((g.mode === "campaign" || g.mode === "campaign-test") && wasDrag) return;
+    if (g.mode === "campaign" || g.mode === "campaign-test") {
+      handleCanvasTap((sx / (g.zoom || 1)) + g.camX, (sy / (g.zoom || 1)) + g.camY);
+    } else {
+      handleCanvasTap(sx, sy);
+    }
+  };
+
+  const handleCanvasPointerCancel = () => {
+    panRef.current.active = false;
+    panRef.current.moved = false;
+  };
+
+  const handleCanvasWheel = (e) => {
+    const g = gs.current;
+    if (g.mode !== "campaign" && g.mode !== "campaign-test") return;
+    e.preventDefault();
+    adjustZoom(e.deltaY > 0 ? -0.08 : 0.08);
   };
 
   const selectTowerType = (type) => { gs.current.selectedTowerType = type; gs.current.selectedPlacedTower = null; setSelectedTower(type); setSelectedPlaced(null); };
@@ -1825,7 +2723,7 @@ export default function TowerDefense() {
       {/* MENU SCREEN */}
       {gameMode === "menu" && (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 20, padding: 20 }}>
-          <div style={{ fontSize: 16, color: "#fbbf24", textAlign: "center", textShadow: "0 0 20px rgba(251,191,36,0.5)" }}>🏰 TOWER DEFENSE 🏰 <span style={{ fontSize: 10, color: "#666", marginLeft: 4 }}>v15</span></div>
+          <div style={{ fontSize: 16, color: "#fbbf24", textAlign: "center", textShadow: "0 0 20px rgba(251,191,36,0.5)" }}>🏰 TOWER DEFENSE 🏰 <span style={{ fontSize: 10, color: "#666", marginLeft: 4 }}>v16</span></div>
           <div style={{ fontSize: 7, color: "rgba(255,255,255,0.4)", textAlign: "center" }}>Choisis ton mode de jeu</div>
           <button onClick={() => startMode("normal")} onTouchEnd={(e) => { e.preventDefault(); e.stopPropagation(); startMode("normal"); }}
             style={{ background: "linear-gradient(135deg, #4ade80, #22c55e)", color: "#000", border: "none", borderRadius: 10, padding: "16px 32px", fontSize: 10, fontFamily: PIXEL_FONT, cursor: "pointer", touchAction: "manipulation", minWidth: 220, minHeight: 56, boxShadow: "0 4px 20px rgba(74,222,128,0.3)" }}>
@@ -1840,6 +2738,20 @@ export default function TowerDefense() {
           </button>
           <div style={{ fontSize: 5, color: "rgba(255,255,255,0.3)", textAlign: "center", maxWidth: 250, marginTop: -12 }}>
             Bâtiments débloqués tous les 3 niveaux. Roulette bonus/malus à chaque vague !
+          </div>
+          <button onClick={() => startMode("campaign")} onTouchEnd={(e) => { e.preventDefault(); e.stopPropagation(); startMode("campaign"); }}
+            style={{ background: "linear-gradient(135deg, #60a5fa, #3b82f6)", color: "#000", border: "none", borderRadius: 10, padding: "16px 32px", fontSize: 10, fontFamily: PIXEL_FONT, cursor: "pointer", touchAction: "manipulation", minWidth: 220, minHeight: 56, boxShadow: "0 4px 20px rgba(59,130,246,0.35)" }}>
+            🐌 MODE CAMPAGNE
+          </button>
+          <div style={{ fontSize: 5, color: "rgba(255,255,255,0.3)", textAlign: "center", maxWidth: 280, marginTop: -12 }}>
+            Escargot horaire, nouvelle carte tous les 7 niveaux, boss aux niveaux 5-6-7 de chaque carte.
+          </div>
+          <button onClick={() => startMode("campaign-test")} onTouchEnd={(e) => { e.preventDefault(); e.stopPropagation(); startMode("campaign-test"); }}
+            style={{ background: "linear-gradient(135deg, #22d3ee, #0ea5e9)", color: "#000", border: "none", borderRadius: 10, padding: "14px 24px", fontSize: 9, fontFamily: PIXEL_FONT, cursor: "pointer", touchAction: "manipulation", minWidth: 220, minHeight: 52, boxShadow: "0 4px 20px rgba(14,165,233,0.35)" }}>
+            🧪 TEST ESCARGOT x3
+          </button>
+          <div style={{ fontSize: 5, color: "rgba(255,255,255,0.3)", textAlign: "center", maxWidth: 280, marginTop: -12 }}>
+            Aperçu final: génération automatique de 3 niveaux d'escargot (navigation caméra).
           </div>
           <button onClick={() => setShowHighscores(true)} onTouchEnd={(e) => { e.preventDefault(); e.stopPropagation(); setShowHighscores(true); }}
             style={{ background: "none", border: "2px solid #fbbf24", borderRadius: 10, padding: "10px 28px", fontSize: 9, fontFamily: PIXEL_FONT, cursor: "pointer", touchAction: "manipulation", minWidth: 180, minHeight: 44, color: "#fbbf24", marginTop: 8 }}>
@@ -1886,18 +2798,46 @@ export default function TowerDefense() {
         <span style={{ color: gold >= (needsNewMap ? GOLD_CAP_MAP : GOLD_CAP) ? "#ef4444" : "#fbbf24" }}>💰 {gold >= 1000 ? `${(gold/1000).toFixed(1)}k` : gold}{gold >= (needsNewMap ? GOLD_CAP_MAP : GOLD_CAP) ? " MAX" : ""}</span>
         <span style={{ color: "#e879f9", fontSize: 7 }}>⭐{score.toLocaleString()}</span>
         <span style={{ color: "#60a5fa" }}>🌊 {wave} · 🗺️ {mapNum}</span>
+        {(gameMode === "campaign" || gameMode === "campaign-test") && <span style={{ color: "#60a5fa", fontSize: 6 }}>🐌 ({campaignCoord.x},{campaignCoord.y}){gameMode === "campaign" ? ` · N${((wave % 7) || 7)}/7` : ""}</span>}
         <span style={{ color: (() => { const ct = gs.current.towers.filter(t => !TOWER_DEFS[t.type].isBuilding).length; return ct >= MAX_TOWERS ? "#ef4444" : "#94a3b8"; })(), fontSize: 7 }}>🗼{gs.current.towers.filter(t => !TOWER_DEFS[t.type].isBuilding).length}/{MAX_TOWERS} 🏗{gs.current.towers.filter(t => TOWER_DEFS[t.type].isBuilding).length}/{MAX_BUILDINGS}</span>
         <button onClick={() => setShowHighscores(true)} onTouchEnd={(e) => { e.stopPropagation(); setShowHighscores(true); }} style={{ background: "none", border: "1px solid #444", borderRadius: 3, color: "#fbbf24", fontSize: 8, fontFamily: PIXEL_FONT, cursor: "pointer", padding: "2px 5px", lineHeight: 1, touchAction: "manipulation", minHeight: 22, minWidth: 22 }}>🏆</button>
         {gameMode === "surprise" && <span style={{ color: "#f59e0b", fontSize: 6 }}>🎰</span>}
+        {gameMode === "campaign" && <span style={{ color: "#60a5fa", fontSize: 6 }}>🐌</span>}
+        {gameMode === "campaign-test" && <span style={{ color: "#22d3ee", fontSize: 6 }}>🧪</span>}
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ color: "#f87171" }}>❤️ {lives}</span>
+          <button onClick={togglePause} onTouchEnd={(e) => { e.stopPropagation(); togglePause(); }} style={{ background: "none", border: `1px solid ${paused ? "#60a5fa" : "#444"}`, borderRadius: 3, color: paused ? "#60a5fa" : "#888", fontSize: 10, fontFamily: PIXEL_FONT, cursor: "pointer", padding: "4px 8px", lineHeight: 1, touchAction: "manipulation", minHeight: 28, minWidth: 28 }}>{paused ? "▶" : "⏸"}</button>
           <button onClick={restartGame} onTouchEnd={(e) => { e.stopPropagation(); restartGame(); }} style={{ background: "none", border: "1px solid #444", borderRadius: 3, color: "#888", fontSize: 10, fontFamily: PIXEL_FONT, cursor: "pointer", padding: "4px 8px", lineHeight: 1, touchAction: "manipulation", minHeight: 28, minWidth: 28 }}>↺</button>
         </div>
       </div>
 
+      {(gameMode === "campaign" || gameMode === "campaign-test") && (
+        <div style={{ display: "flex", gap: 5, marginBottom: 4, alignItems: "center", flexWrap: "wrap", justifyContent: "center" }}>
+          <span style={{ color: "rgba(255,255,255,0.35)", fontSize: 6 }}>Cam:</span>
+          <button onClick={() => nudgeCamera(-CELL * 2, 0)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#60a5fa", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>◀</button>
+          <button onClick={() => nudgeCamera(0, -CELL * 2)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#60a5fa", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>▲</button>
+          <button onClick={() => nudgeCamera(0, CELL * 2)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#60a5fa", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>▼</button>
+          <button onClick={() => nudgeCamera(CELL * 2, 0)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#60a5fa", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>▶</button>
+          <button onClick={() => adjustZoom(-0.1)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#22d3ee", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>－</button>
+          <span style={{ color: "#22d3ee", fontSize: 6, minWidth: 36, textAlign: "center" }}>{Math.round(zoom * 100)}%</span>
+          <button onClick={() => adjustZoom(0.1)} style={{ background: "#141820", border: "1px solid #2b3344", color: "#22d3ee", borderRadius: 5, fontSize: 10, fontFamily: PIXEL_FONT, minWidth: 34, minHeight: 32, cursor: "pointer", touchAction: "manipulation" }}>＋</button>
+          <span style={{ color: "rgba(96,165,250,0.8)", fontSize: 5 }}>👆 Glisser la carte pour naviguer</span>
+        </div>
+      )}
+
       <div style={{ position: "relative", borderRadius: 5, overflow: "hidden", border: "2px solid #252d3a", boxShadow: "0 0 20px rgba(40,30,80,0.5)" }}>
-        <canvas ref={canvasRef} width={CW} height={CH} onClick={handleCanvasClick} onTouchEnd={handleTouchEnd} style={{ display: "block", maxWidth: "96vw", cursor: "pointer" }} />
-        {phase === "prep" && phase !== "gameover" && (
+        <canvas
+          ref={canvasRef}
+          width={CW}
+          height={CH}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerCancel}
+          onWheel={handleCanvasWheel}
+          style={{ display: "block", maxWidth: "96vw", cursor: (gameMode === "campaign" || gameMode === "campaign-test") ? "grab" : "pointer", touchAction: "none" }}
+        />
+        {phase === "prep" && phase !== "gameover" && gameMode !== "campaign-test" && (
           <button
             onClick={(e) => { e.stopPropagation(); startWave(); }}
             onTouchEnd={(e) => { e.preventDefault(); e.stopPropagation(); startWave(); }}
@@ -1915,10 +2855,16 @@ export default function TowerDefense() {
         {phase === "wave" && (
           <div style={{ position: "absolute", bottom: 10, left: "50%", transform: "translateX(-50%)", color: "rgba(255,255,255,0.5)", fontSize: 7, background: "rgba(0,0,0,0.5)", padding: "4px 10px", borderRadius: 4 }}>⚔️ Vague en cours...</div>
         )}
+        {gameMode === "campaign-test" && (
+          <div style={{ position: "absolute", bottom: 10, left: "50%", transform: "translateX(-50%)", color: "#22d3ee", fontSize: 7, background: "rgba(0,0,0,0.6)", padding: "4px 10px", borderRadius: 4, border: "1px solid rgba(34,211,238,0.5)" }}>🧪 Aperçu escargot x3 — flèches/WASD pour naviguer</div>
+        )}
+        {paused && (
+          <div style={{ position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", color: "#60a5fa", fontSize: 7, background: "rgba(0,0,0,0.65)", padding: "4px 10px", borderRadius: 4, border: "1px solid rgba(96,165,250,0.45)" }}>⏸ PAUSE</div>
+        )}
       </div>
 
       {/* Tower info panel */}
-      {selectedPlaced && (
+      {gameMode !== "campaign-test" && selectedPlaced && (
         <div style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 5, background: "#141820", borderRadius: 5, padding: "5px 8px", border: "1px solid #252d3a", maxWidth: "96vw", flexWrap: "wrap", justifyContent: "center", fontSize: 7 }}>
           <span style={{ color: "#fff" }}>{selDef.symbol} {selDef.name} Nv.{selectedPlaced.level}</span>
           {(() => { const r = getRank(selectedPlaced.xp); const nr = getNextRank(selectedPlaced.xp); return r.rank > 0 ? (
@@ -1936,7 +2882,7 @@ export default function TowerDefense() {
           ) : (
             <span style={{ color: "#a78bfa" }}>DMG:{selectedPlaced.damage}{selectedPlaced.buffed ? ` (${selectedPlaced.buffedDamage})` : ""}</span>
           )}
-          <span style={{ color: "#f87171" }}>HP:{selectedPlaced.hp}/{selectedPlaced.maxHp}</span>
+          <span style={{ color: "#f87171" }}>HP:{Math.floor(selectedPlaced.hp)}/{Math.floor(selectedPlaced.maxHp)}</span>
           <span style={{ color: "#94a3b8", fontSize: 6 }}>🛡{selectedPlaced.armor} ·💀{selectedPlaced.kills}</span>
           {selectedPlaced.level < 5 && (
             <button onClick={upgradeTower} onTouchEnd={(e) => { e.stopPropagation(); upgradeTower(); }} disabled={!canAfford(upgCost)} style={{ background: canAfford(upgCost) ? "#4ade80" : "#333", color: "#000", border: "none", borderRadius: 3, padding: "5px 8px", fontSize: 7, fontFamily: PIXEL_FONT, cursor: canAfford(upgCost) ? "pointer" : "default", opacity: canAfford(upgCost) ? 1 : 0.4, touchAction: "manipulation", minHeight: 32 }}>⬆{upgCost}💰</button>
@@ -1949,7 +2895,7 @@ export default function TowerDefense() {
       )}
 
       {/* Tower shop */}
-      {gameMode !== "menu" && (
+      {gameMode !== "menu" && gameMode !== "campaign-test" && (
       <div style={{ display: "flex", gap: 3, marginTop: 4, flexWrap: "wrap", justifyContent: "center", maxWidth: "96vw" }}>
         {Object.entries(TOWER_DEFS).filter(([,d]) => !d.isBuilding).map(([key, def]) => (
           <button key={key} onClick={() => selectTowerType(key)}
@@ -1970,7 +2916,7 @@ export default function TowerDefense() {
       </div>
       )}
       {/* Building shop */}
-      {gameMode !== "menu" && unlockedBuildings.length > 0 && (
+      {gameMode !== "menu" && gameMode !== "campaign-test" && unlockedBuildings.length > 0 && (
         <div style={{ display: "flex", gap: 3, marginTop: 2, flexWrap: "wrap", justifyContent: "center", maxWidth: "96vw" }}>
           <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 5, fontFamily: PIXEL_FONT, alignSelf: "center" }}>BAT:</span>
           {Object.entries(TOWER_DEFS).filter(([k, d]) => d.isBuilding && unlockedBuildings.includes(k)).map(([key, def]) => (
@@ -1998,8 +2944,16 @@ export default function TowerDefense() {
           )}
         </div>
       )}
-      {gameMode === "surprise" && unlockedBuildings.length === 0 && (
-        <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 5, marginTop: 2 }}>🔒 Bâtiments débloqués à la vague 3</div>
+      {(gameMode === "surprise" || gameMode === "campaign") && unlockedBuildings.length === 0 && (
+        <div style={{ color: "rgba(255,255,255,0.2)", fontSize: 5, marginTop: 2 }}>🔒 Bâtiments débloqués tous les 3 niveaux</div>
+      )}
+
+      {(gameMode === "campaign" || gameMode === "campaign-test") && (
+        <div style={{ color: "rgba(96,165,250,0.75)", fontSize: 5, marginTop: 2 }}>
+          {gameMode === "campaign"
+            ? `🐌 Carte ${mapNum} · spiral (${campaignCoord.x},${campaignCoord.y}) · Boss N5/N6/N7`
+            : `🧪 Aperçu final · 3 niveaux d'escargot · ${mapNum} cartes`}
+        </div>
       )}
 
       {/* Active wave mod indicator */}
@@ -2031,7 +2985,7 @@ export default function TowerDefense() {
           <div style={{ background: "#1a1f2e", border: "2px solid #fbbf24", borderRadius: 10, padding: "24px 28px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, maxWidth: "90vw" }}>
             <div style={{ fontSize: 16, color: "#fbbf24" }}>🏆 NOUVEAU HIGHSCORE!</div>
             <div style={{ fontSize: 20, color: "#e879f9" }}>⭐ {finalScore.toLocaleString()} pts</div>
-            <div style={{ fontSize: 8, color: "#94a3b8" }}>Vague {wave} · Carte {mapNum} · {finalMode === "surprise" ? "🎰 Surprise" : "Normal"}</div>
+            <div style={{ fontSize: 8, color: "#94a3b8" }}>Vague {wave} · Carte {mapNum} · {finalMode === "surprise" ? "🎰 Surprise" : finalMode === "campaign" ? "🐌 Campagne" : "Normal"}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center", marginTop: 6 }}>
               <div style={{ fontSize: 8, color: "#fbbf24" }}>Entre ton pseudo :</div>
               <input
@@ -2112,7 +3066,7 @@ export default function TowerDefense() {
                     <span style={{ color: i < 3 ? "#fbbf24" : "#e2e8f0", fontSize: 7, flex: 1, overflow: "hidden" }}>{hs.name}</span>
                     <span style={{ color: "#e879f9", fontSize: 7, width: 70, textAlign: "right" }}>{hs.score.toLocaleString()}</span>
                     <span style={{ color: "#60a5fa", fontSize: 7, width: 40, textAlign: "right" }}>{hs.wave}</span>
-                    <span style={{ color: hs.mode === "surprise" ? "#f59e0b" : "#94a3b8", fontSize: 6, width: 35, textAlign: "right" }}>{hs.mode === "surprise" ? "🎰" : "⚔️"}</span>
+                    <span style={{ color: hs.mode === "surprise" ? "#f59e0b" : hs.mode === "campaign" ? "#60a5fa" : "#94a3b8", fontSize: 6, width: 35, textAlign: "right" }}>{hs.mode === "surprise" ? "🎰" : hs.mode === "campaign" ? "🐌" : "⚔️"}</span>
                   </div>
                 ))}
               </div>
