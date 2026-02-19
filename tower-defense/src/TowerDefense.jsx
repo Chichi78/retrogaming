@@ -494,6 +494,74 @@ function getSide(fromSpiral, toSpiral) {
   return null;
 }
 
+// Build one campaign map where mobs spawn from border entries and attack the village center.
+// `entrySides` controls which borders can spawn mobs (e.g. exclude the incoming side from previous map).
+function buildVillageDefenseMap(seed, entrySides = ["left"], colOffset = 0, rowOffset = 0) {
+  const rng = ((s) => {
+    let v = s;
+    return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; };
+  })(seed);
+
+  const villageCol = Math.floor(COLS / 2);
+  const villageRow = Math.floor(ROWS / 2);
+  const entries = entrySides.map((side) => pickBorderPoint(side, rng));
+  const cells = new Set();
+  const spawnPaths = [];
+
+  const addCell = (c, r) => cells.add(`${c + colOffset},${r + rowOffset}`);
+  const wpToWorld = (c, r) => ({ x: (c + colOffset) * CELL + CELL / 2, y: (r + rowOffset) * CELL + CELL / 2 });
+
+  const goHoriz = (fromCol, toCol, r) => {
+    const dir = toCol > fromCol ? 1 : -1;
+    for (let c = fromCol; dir > 0 ? c <= toCol : c >= toCol; c += dir) addCell(c, r);
+  };
+  const goVert = (c, fromRow, toRow) => {
+    const dir = toRow > fromRow ? 1 : -1;
+    for (let r = fromRow; dir > 0 ? r <= toRow : r >= toRow; r += dir) addCell(c, r);
+  };
+
+  entries.forEach((entry) => {
+    const wps = [];
+    if (entry.side === "left") wps.push({ x: (colOffset * CELL) - 10, y: (rowOffset + entry.row) * CELL + CELL / 2 });
+    else if (entry.side === "right") wps.push({ x: ((colOffset + COLS) * CELL) + 10, y: (rowOffset + entry.row) * CELL + CELL / 2 });
+    else if (entry.side === "top") wps.push({ x: (colOffset + entry.col) * CELL + CELL / 2, y: (rowOffset * CELL) - 10 });
+    else wps.push({ x: (colOffset + entry.col) * CELL + CELL / 2, y: ((rowOffset + ROWS) * CELL) + 10 });
+
+    let col = entry.col;
+    let row = entry.row;
+    addCell(col, row);
+    wps.push(wpToWorld(col, row));
+
+    const segments = 4 + Math.floor(rng() * 3);
+    for (let seg = 0; seg < segments; seg++) {
+      const progress = (seg + 1) / (segments + 1);
+      const targetCol = clamp(Math.round(col + (villageCol - col) * progress + (rng() - 0.5) * 6), 1, COLS - 2);
+      const targetRow = clamp(Math.round(row + (villageRow - row) * progress + (rng() - 0.5) * 6), 1, ROWS - 2);
+      if (rng() < 0.5) {
+        goHoriz(col, targetCol, row); col = targetCol; wps.push(wpToWorld(col, row));
+        goVert(col, row, targetRow); row = targetRow; wps.push(wpToWorld(col, row));
+      } else {
+        goVert(col, row, targetRow); row = targetRow; wps.push(wpToWorld(col, row));
+        goHoriz(col, targetCol, row); col = targetCol; wps.push(wpToWorld(col, row));
+      }
+    }
+
+    if (col !== villageCol) { goHoriz(col, villageCol, row); col = villageCol; wps.push(wpToWorld(col, row)); }
+    if (row !== villageRow) { goVert(col, row, villageRow); row = villageRow; wps.push(wpToWorld(col, row)); }
+
+    spawnPaths.push(wps);
+  });
+
+  addCell(villageCol, villageRow);
+
+  return {
+    path: { cells, waypoints: spawnPaths[0] || [] },
+    spawnPaths,
+    borderPoints: entries,
+    baseCell: { col: colOffset + villageCol, row: rowOffset + villageRow },
+  };
+}
+
 // Build the full campaign world with multi-border maps.
 // Each map has an entry point on every border that touches another map.
 // Paths inside each map connect all its border points.
@@ -584,10 +652,36 @@ function buildCampaignPreviewWorld(seedStart, levels = 3) {
     const localPath = generateCampaignPath(mapSeed, bps);
     const worldPath = offsetPathToWorld(localPath, colOffset, rowOffset);
 
+    // Add a guaranteed connector from map village center to nearest cell of the generated main path.
+    const villageCol = colOffset + Math.floor(COLS / 2);
+    const villageRow = rowOffset + Math.floor(ROWS / 2);
+    let nearest = null;
+    let best = Infinity;
+    worldPath.cells.forEach((k) => {
+      const [pc, pr] = k.split(",").map(Number);
+      if (pc < colOffset || pc >= colOffset + COLS || pr < rowOffset || pr >= rowOffset + ROWS) return;
+      const d = Math.abs(pc - villageCol) + Math.abs(pr - villageRow);
+      if (d < best) { best = d; nearest = { col: pc, row: pr }; }
+    });
+    worldPath.cells.add(`${villageCol},${villageRow}`);
+    if (nearest) {
+      let cc = villageCol;
+      let rr = villageRow;
+      while (cc !== nearest.col) {
+        cc += nearest.col > cc ? 1 : -1;
+        worldPath.cells.add(`${cc},${rr}`);
+      }
+      while (rr !== nearest.row) {
+        rr += nearest.row > rr ? 1 : -1;
+        worldPath.cells.add(`${cc},${rr}`);
+      }
+    }
+
     const mapObj = {
       index: idx, colOffset, rowOffset, path: worldPath,
       borderPoints: bps, // local coordinates
       spawnCell: { col: colOffset + bps[0].col, row: rowOffset + bps[0].row },
+      baseCell: { col: villageCol, row: villageRow },
     };
     maps.push(mapObj);
     worldPath.cells.forEach((k) => allCells.add(k));
@@ -600,7 +694,7 @@ function buildCampaignPreviewWorld(seedStart, levels = 3) {
 
   // Base cell = center of map 0
   const centerMap = maps[0];
-  const baseCell = {
+  const baseCell = centerMap.baseCell || {
     col: centerMap.colOffset + Math.floor(COLS / 2),
     row: centerMap.rowOffset + Math.floor(ROWS / 2),
   };
@@ -976,70 +1070,25 @@ export default function TowerDefense() {
     g.mapSeed = g.mapSeed * 3 + 17;
     if (g.mode === "campaign") {
       const nextIndex = (g.campaignMapIndex || 0) + 1;
-      const nextSpiral = generateCampaignSpiralCoord(nextIndex);
-      const colOffset = nextSpiral.x * COLS;
-      const rowOffset = nextSpiral.y * ROWS;
-
-      // Determine border points for the new map
-      const connRng = ((s) => { let v = s; return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; }; })(g.mapSeed);
-
-      // Build a spiral lookup of existing maps
-      const spiralLookup = new Map();
-      g.campaignMaps.forEach((m) => {
-        const sx = Math.round(m.colOffset / COLS);
-        const sy = Math.round(m.rowOffset / ROWS);
-        spiralLookup.set(`${sx},${sy}`, m);
-      });
-
-      const bps = [];
-      const sides = [
-        { side: "left", dx: -1, dy: 0 },
-        { side: "right", dx: 1, dy: 0 },
-        { side: "top", dx: 0, dy: -1 },
-        { side: "bottom", dx: 0, dy: 1 },
-      ];
-
-      for (const s of sides) {
-        const neighborKey = `${nextSpiral.x + s.dx},${nextSpiral.y + s.dy}`;
-        const neighborMap = spiralLookup.get(neighborKey);
-        if (neighborMap) {
-          // This side connects to an existing map — match their border point
-          const theirSide = oppositeSide(s.side);
-          const theirBp = (neighborMap.borderPoints || []).find((b) => b.side === theirSide);
-          if (theirBp) {
-            // Mirror the point: same row for left/right, same col for top/bottom
-            const bp = { ...mirrorBorderPoint(theirBp), side: s.side };
-            bps.push(bp);
-          } else {
-            bps.push(pickBorderPoint(s.side, connRng));
-          }
-        } else {
-          // Outer border — spawn entry
-          bps.push(pickBorderPoint(s.side, connRng));
-        }
+      if ((g.campaignMaps || []).length === 0) {
+        const preview = buildCampaignPreviewWorld(g.mapSeed, 5);
+        g.campaignMaps = preview.maps;
       }
-
-      // Sort by angle from center for path generation
-      const cx = COLS / 2, cy = ROWS / 2;
-      bps.sort((a, b) => Math.atan2(a.row - cy, a.col - cx) - Math.atan2(b.row - cy, b.col - cx));
-
-      const localPath = generateCampaignPath(g.mapSeed, bps);
-      const worldPath = offsetPathToWorld(localPath, colOffset, rowOffset);
-      const newMapObj = {
-        index: nextIndex, colOffset, rowOffset, path: worldPath,
-        borderPoints: bps,
-        spawnCell: { col: colOffset + bps[0].col, row: rowOffset + bps[0].row },
-      };
-
-      g.campaignMaps.push(newMapObj);
-      g.campaignMapIndex = nextIndex;
-      rebuildCampaignCompositePath(g);
-
-      const bounds = getCampaignWorldBounds(g.campaignMaps);
-      const viewW = CW / (g.zoom || 1);
-      const viewH = CH / (g.zoom || 1);
-      g.camX = clamp(colOffset * CELL + viewW * 0.2, bounds.minX - viewW * 0.25, bounds.maxX - viewW + viewW * 0.25);
-      g.camY = clamp(rowOffset * CELL + viewH * 0.2, bounds.minY - viewH * 0.25, bounds.maxY - viewH + viewH * 0.25);
+      const targetMap = g.campaignMaps[nextIndex] || g.campaignMaps[g.campaignMaps.length - 1];
+      if (targetMap) {
+        g.campaignMapIndex = targetMap.index;
+        g.path = { cells: new Set(targetMap.path.cells), waypoints: targetMap.path.waypoints };
+        g.spawnPaths = [targetMap.path.waypoints];
+        g.baseCell = targetMap.baseCell || {
+          col: targetMap.colOffset + Math.floor(COLS / 2),
+          row: targetMap.rowOffset + Math.floor(ROWS / 2),
+        };
+        const bounds = getCampaignWorldBounds([targetMap]);
+        const viewW = CW / (g.zoom || 1);
+        const viewH = CH / (g.zoom || 1);
+        g.camX = clamp((bounds.minX + bounds.maxX - viewW) / 2, bounds.minX - viewW * 0.25, bounds.maxX - viewW + viewW * 0.25);
+        g.camY = clamp((bounds.minY + bounds.maxY - viewH) / 2, bounds.minY - viewH * 0.25, bounds.maxY - viewH + viewH * 0.25);
+      }
     } else {
       g.path = generatePath(g.mapSeed);
       g.spawnPaths = [g.path.waypoints];
@@ -1550,30 +1599,23 @@ export default function TowerDefense() {
     g.paused = false;
     g.camX = 0; g.camY = 0; g.zoom = 1;
     if (mode === "campaign") {
-      // First map: border entries on all 4 sides
-      const connRng = ((s) => { let v = s; return () => { v = (v * 16807 + 0) % 2147483647; return (v & 0x7fffffff) / 0x7fffffff; }; })(g.mapSeed);
-      const bps = [
-        pickBorderPoint("left", connRng),
-        pickBorderPoint("right", connRng),
-        pickBorderPoint("top", connRng),
-        pickBorderPoint("bottom", connRng),
-      ];
-      // Sort by angle from center for path generation
-      const cx = COLS / 2, cy = ROWS / 2;
-      bps.sort((a, b) => Math.atan2(a.row - cy, a.col - cx) - Math.atan2(b.row - cy, b.col - cx));
-      const localPath = generateCampaignPath(g.mapSeed, bps);
-      const basePath = offsetPathToWorld(localPath, 0, 0);
-      const firstMap = {
-        index: 0, colOffset: 0, rowOffset: 0, path: basePath,
-        borderPoints: bps,
-        spawnCell: { col: bps[0].col, row: bps[0].row },
+      const preview = buildCampaignPreviewWorld(g.mapSeed, 5);
+      g.campaignMaps = preview.maps;
+      const firstMap = g.campaignMaps[0];
+      g.path = { cells: new Set(firstMap.path.cells), waypoints: firstMap.path.waypoints };
+      g.baseCell = firstMap.baseCell || {
+        col: firstMap.colOffset + Math.floor(COLS / 2),
+        row: firstMap.rowOffset + Math.floor(ROWS / 2),
       };
-      g.campaignMaps = [firstMap];
-      g.path = { cells: new Set(basePath.cells), waypoints: basePath.waypoints };
-      g.baseCell = { col: Math.floor(COLS / 2), row: Math.floor(ROWS / 2) };
-      g.spawnPaths = buildCampaignSpawnPaths(g.campaignMaps);
+      g.spawnPaths = [firstMap.path.waypoints];
       g.campaignMapIndex = 0;
+      g.mapNum = 1;
       g.zoom = 1;
+      const bounds = getCampaignWorldBounds([firstMap]);
+      const viewW = CW / g.zoom;
+      const viewH = CH / g.zoom;
+      g.camX = clamp((bounds.minX + bounds.maxX - viewW) / 2, bounds.minX - viewW * 0.25, bounds.maxX - viewW + viewW * 0.25);
+      g.camY = clamp((bounds.minY + bounds.maxY - viewH) / 2, bounds.minY - viewH * 0.25, bounds.maxY - viewH + viewH * 0.25);
       g.wave = 0; g.phase = "prep"; g.needsNewMap = false;
       g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = []; g.enemyTurrets = []; g.enemyBuildings = [];
       g.enemyBase = null; g.altPath = null; g.altPathCells = null; g.frozenZones = [];
@@ -1801,9 +1843,32 @@ export default function TowerDefense() {
         if (e.waypointIdx >= eWp.length) {
           g.lives = Math.max(0, g.lives - 1);
           if (g.lives <= 0 && g.phase !== "gameover" && g.phase !== "scoreboard") {
-            // Final score: add wave bonus
-            g.score += g.wave * 50;
-            g.phase = "gameover";
+            if (g.mode === "campaign" && (g.campaignMapIndex || 0) > 0) {
+              const prevIndex = Math.max(0, (g.campaignMapIndex || 0) - 1);
+              const prevMap = (g.campaignMaps || []).find((m) => m.index === prevIndex);
+              if (prevMap) {
+                g.campaignMapIndex = prevIndex;
+                g.mapNum = Math.max(1, g.mapNum - 1);
+                g.path = { cells: new Set(prevMap.path.cells), waypoints: prevMap.path.waypoints };
+                g.spawnPaths = prevMap.spawnPaths || [prevMap.path.waypoints];
+                g.baseCell = prevMap.baseCell || { col: Math.floor(COLS / 2), row: Math.floor(ROWS / 2) };
+                g.enemies = []; g.bullets = []; g.eBullets = []; g.flashes = [];
+                g.enemyTurrets = []; g.enemyBuildings = [];
+                g.enemyBase = null; g.altPath = null; g.altPathCells = null; g.frozenZones = [];
+                g.selectedPlacedTower = null;
+                g.needsNewMap = false;
+                g.phase = "prep";
+                g.lives = 20;
+                g.texts.push({ x: CW / 2, y: 24, text: "↩ Repli: retour carte précédente", life: 2.2 });
+              } else {
+                g.score += g.wave * 50;
+                g.phase = "gameover";
+              }
+            } else {
+              // Final score: add wave bonus
+              g.score += g.wave * 50;
+              g.phase = "gameover";
+            }
           }
           return false;
         }
@@ -2234,20 +2299,38 @@ export default function TowerDefense() {
       }
 
       if ((g.mode === "campaign" || g.mode === "campaign-test") && (g.campaignMaps || []).length > 0) {
-        g.campaignMaps.forEach((m) => {
-          const x = m.colOffset * CELL;
-          const y = m.rowOffset * CELL;
-          ctx.fillStyle = "rgba(20,30,45,0.35)";
-          ctx.fillRect(x, y, CW, CH);
-          ctx.strokeStyle = "rgba(96,165,250,0.28)";
-          ctx.lineWidth = 1;
-          ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
-          ctx.fillStyle = "rgba(96,165,250,0.45)";
-          ctx.font = `6px ${PIXEL_FONT}`;
-          ctx.textAlign = "left";
-          ctx.textBaseline = "top";
-          ctx.fillText(`M${m.index + 1}`, x + 4, y + 4);
-        });
+        if (g.mode === "campaign-test") {
+          (g.campaignMaps || []).forEach((m) => {
+            const x = m.colOffset * CELL;
+            const y = m.rowOffset * CELL;
+            ctx.fillStyle = "rgba(20,30,45,0.35)";
+            ctx.fillRect(x, y, CW, CH);
+            ctx.strokeStyle = "rgba(96,165,250,0.38)";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
+            ctx.fillStyle = "rgba(96,165,250,0.7)";
+            ctx.font = `6px ${PIXEL_FONT}`;
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            ctx.fillText(`M${m.index + 1}`, x + 4, y + 4);
+          });
+        } else {
+          const activeMap = (g.campaignMaps || []).find((m) => m.index === g.campaignMapIndex) || g.campaignMaps[g.campaignMaps.length - 1];
+          if (activeMap) {
+            const x = activeMap.colOffset * CELL;
+            const y = activeMap.rowOffset * CELL;
+            ctx.fillStyle = "rgba(20,30,45,0.35)";
+            ctx.fillRect(x, y, CW, CH);
+            ctx.strokeStyle = "rgba(96,165,250,0.28)";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
+            ctx.fillStyle = "rgba(96,165,250,0.55)";
+            ctx.font = `6px ${PIXEL_FONT}`;
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            ctx.fillText(`M${activeMap.index + 1}`, x + 4, y + 4);
+          }
+        }
       }
 
       // Path
@@ -2264,33 +2347,64 @@ export default function TowerDefense() {
 
       ctx.font = `7px ${PIXEL_FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       if (g.mode === "campaign" || g.mode === "campaign-test") {
-        // Show base marker
-        if (g.baseCell) {
-          ctx.fillStyle = "rgba(239,68,68,0.8)";
-          ctx.fillText("🏠", g.baseCell.col * CELL + CELL / 2, g.baseCell.row * CELL + CELL / 2);
-        }
-        // Show border entry markers on each map
-        const spiralLookup = new Set();
-        (g.campaignMaps || []).forEach((m) => {
-          const sx = Math.round(m.colOffset / COLS);
-          const sy = Math.round(m.rowOffset / ROWS);
-          spiralLookup.add(`${sx},${sy}`);
-        });
-        (g.campaignMaps || []).forEach((m) => {
-          const sx = Math.round(m.colOffset / COLS);
-          const sy = Math.round(m.rowOffset / ROWS);
-          const sideDx = { left: -1, right: 1, top: 0, bottom: 0 };
-          const sideDy = { left: 0, right: 0, top: -1, bottom: 1 };
-          (m.borderPoints || []).forEach((bp) => {
-            const nx = sx + (sideDx[bp.side] || 0);
-            const ny = sy + (sideDy[bp.side] || 0);
-            const isOuter = !spiralLookup.has(`${nx},${ny}`);
-            if (isOuter) {
-              ctx.fillStyle = "rgba(74,222,128,0.6)";
-              ctx.fillText("▶", (m.colOffset + bp.col) * CELL + CELL / 2, (m.rowOffset + bp.row) * CELL + CELL / 2);
-            }
+        if (g.mode === "campaign-test") {
+          const spiralLookup = new Set();
+          (g.campaignMaps || []).forEach((m) => {
+            const sx = Math.round(m.colOffset / COLS);
+            const sy = Math.round(m.rowOffset / ROWS);
+            spiralLookup.add(`${sx},${sy}`);
           });
-        });
+          (g.campaignMaps || []).forEach((m) => {
+            const villageX = (m.colOffset + Math.floor(COLS / 2)) * CELL + CELL / 2;
+            const villageY = (m.rowOffset + Math.floor(ROWS / 2)) * CELL + CELL / 2;
+            ctx.font = `10px serif`;
+            ctx.fillStyle = "rgba(239,68,68,0.78)";
+            ctx.fillText("🏠", villageX, villageY);
+
+            const sx = Math.round(m.colOffset / COLS);
+            const sy = Math.round(m.rowOffset / ROWS);
+            const sideDx = { left: -1, right: 1, top: 0, bottom: 0 };
+            const sideDy = { left: 0, right: 0, top: -1, bottom: 1 };
+            (m.borderPoints || []).forEach((bp) => {
+              const nx = sx + (sideDx[bp.side] || 0);
+              const ny = sy + (sideDy[bp.side] || 0);
+              const isOuter = !spiralLookup.has(`${nx},${ny}`);
+              const x = (m.colOffset + bp.col) * CELL + CELL / 2;
+              const y = (m.rowOffset + bp.row) * CELL + CELL / 2;
+              ctx.font = `7px ${PIXEL_FONT}`;
+              ctx.fillStyle = isOuter ? "rgba(74,222,128,0.85)" : "rgba(147,197,253,0.8)";
+              ctx.fillText(isOuter ? "▶" : "•", x, y);
+            });
+          });
+        } else {
+          const activeMap = (g.campaignMaps || []).find((m) => m.index === g.campaignMapIndex) || g.campaignMaps[g.campaignMaps.length - 1];
+          if (g.baseCell) {
+            ctx.font = `12px serif`;
+            ctx.fillStyle = "rgba(239,68,68,0.88)";
+            ctx.fillText("🏠", g.baseCell.col * CELL + CELL / 2, g.baseCell.row * CELL + CELL / 2);
+            ctx.font = `5px ${PIXEL_FONT}`;
+            ctx.fillStyle = "rgba(239,68,68,0.85)";
+            ctx.fillText("VILLAGE", g.baseCell.col * CELL + CELL / 2, g.baseCell.row * CELL + CELL / 2 + 12);
+          }
+          if (activeMap) {
+            (activeMap.borderPoints || []).forEach((bp) => {
+              const x = (activeMap.colOffset + bp.col) * CELL + CELL / 2;
+              const y = (activeMap.rowOffset + bp.row) * CELL + CELL / 2;
+              ctx.fillStyle = "rgba(74,222,128,0.75)";
+              ctx.fillText("▶", x, y);
+            });
+            if (activeMap.blockedSide) {
+              const bx = activeMap.blockedSide === "left" ? activeMap.colOffset * CELL + CELL / 2
+                : activeMap.blockedSide === "right" ? (activeMap.colOffset + COLS - 1) * CELL + CELL / 2
+                : (activeMap.colOffset + Math.floor(COLS / 2)) * CELL + CELL / 2;
+              const by = activeMap.blockedSide === "top" ? activeMap.rowOffset * CELL + CELL / 2
+                : activeMap.blockedSide === "bottom" ? (activeMap.rowOffset + ROWS - 1) * CELL + CELL / 2
+                : (activeMap.rowOffset + Math.floor(ROWS / 2)) * CELL + CELL / 2;
+              ctx.fillStyle = "rgba(148,163,184,0.85)";
+              ctx.fillText("⛔", bx, by);
+            }
+          }
+        }
       } else {
         ctx.fillStyle = "rgba(74,222,128,0.4)"; ctx.fillText("▶IN", 14, wp[0].y);
         ctx.fillStyle = "rgba(239,68,68,0.4)"; ctx.fillText("OUT▶", CW - 14, wp[wp.length - 1].y);
